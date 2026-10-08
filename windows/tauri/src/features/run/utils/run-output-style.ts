@@ -1,4 +1,5 @@
 import { leadingTimeLength } from "./output-timestamper";
+import type { OutputLocationMatch, OutputSourceTarget } from "./run-output-locations";
 
 export type OutputSeverity = "error" | "warning" | "info" | "debug";
 
@@ -10,6 +11,8 @@ export interface RunOutputSpan {
     backgroundColor?: string;
     fontWeight?: number;
   };
+  /** Present on linkified fragments; consumers decide whether to navigate. */
+  location?: OutputSourceTarget;
 }
 
 interface AnsiStyle {
@@ -40,6 +43,8 @@ const SEVERITY_CLASS: Record<OutputSeverity, string> = {
 };
 
 const TIMESTAMP_CLASS = "text-subtle-foreground/70";
+
+const LOCATION_CLASS = "underline decoration-dotted underline-offset-2";
 
 const ANSI_PALETTE_KEYS = [
   "terminal-black",
@@ -148,7 +153,12 @@ export function parseAnsi(source: string): ParsedAnsi {
   return { text, ranges, hasStyling };
 }
 
-export function renderRunOutput(source: string): RunOutputSpan[] {
+export type OutputLocationResolver = (line: string) => OutputLocationMatch | null;
+
+export function renderRunOutput(
+  source: string,
+  resolveLocation?: OutputLocationResolver,
+): RunOutputSpan[] {
   if (source.length === 0) return [];
   const parsed = parseAnsi(source);
   const spans: RunOutputSpan[] = [];
@@ -186,11 +196,21 @@ export function renderRunOutput(source: string): RunOutputSpan[] {
     const line = parsed.text.slice(lineStart, lineEnd);
     const timeLength = leadingTimeLength(line) ?? 0;
     const severity = severityOfLine(line);
-    emit(lineStart, lineStart + timeLength, { kind: "timestamp" });
-    emit(lineStart + timeLength, newline === -1 ? parsed.text.length : newline + 1, {
-      kind: "body",
-      severity,
-    });
+    const lineEndWithNewline = newline === -1 ? parsed.text.length : newline + 1;
+    const location = resolveLocation?.(line) ?? null;
+    if (location && location.start > timeLength && location.end <= lineEnd) {
+      emit(lineStart, lineStart + timeLength, { kind: "timestamp" });
+      emit(lineStart + timeLength, lineStart + location.start, { kind: "body", severity });
+      emit(lineStart + location.start, lineStart + location.end, {
+        kind: "location",
+        severity,
+        target: location.target,
+      });
+      emit(lineStart + location.end, lineStart + lineEndWithNewline, { kind: "body", severity });
+    } else {
+      emit(lineStart, lineStart + timeLength, { kind: "timestamp" });
+      emit(lineStart + timeLength, lineStart + lineEndWithNewline, { kind: "body", severity });
+    }
     if (newline === -1) break;
     lineStart = newline + 1;
   }
@@ -200,7 +220,8 @@ export function renderRunOutput(source: string): RunOutputSpan[] {
 
 type LineOverlay =
   | { kind: "timestamp" }
-  | { kind: "body"; severity?: OutputSeverity };
+  | { kind: "body"; severity?: OutputSeverity }
+  | { kind: "location"; severity?: OutputSeverity; target: OutputSourceTarget };
 
 function hasNonDefaultSgr(style: AnsiStyle): boolean {
   return style.bold || style.color !== undefined || style.background !== undefined;
@@ -214,7 +235,10 @@ function pushSpan(
 ): void {
   if (text.length === 0) return;
   const span: RunOutputSpan = { text };
-  if (overlay.kind === "timestamp") {
+  if (overlay.kind === "location") {
+    span.className = `${LOCATION_CLASS} ${overlay.severity ? SEVERITY_CLASS[overlay.severity] : ""}`.trim();
+    span.location = overlay.target;
+  } else if (overlay.kind === "timestamp") {
     span.className = TIMESTAMP_CLASS;
   } else if (hasNonDefaultSgr(style)) {
     span.style = ansiStyle(style);
@@ -233,6 +257,9 @@ function pushSpan(
 }
 
 function sameSpanStyle(left: RunOutputSpan, right: RunOutputSpan): boolean {
+  // Linkified fragments keep their own span so their target is never merged
+  // into neighbouring text.
+  if (left.location || right.location) return false;
   return (
     left.className === right.className &&
     left.style?.color === right.style?.color &&

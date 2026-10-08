@@ -32,9 +32,57 @@ import { RunServicesMenu } from "./run-services-menu";
 import { RunConfigurationBrowser } from "./run-configuration-browser";
 import { selectRunOutput } from "../utils/run-output-selection";
 import { RunOutputText } from "./run-output-text";
+import {
+  resolveOutputLocation as resolveOutputLocationIn,
+  type OutputSourceTarget,
+} from "../utils/run-output-locations";
+import { readFileContent } from "@/features/file-system/controllers/file-operations";
+import { EDITOR_CONSTANTS } from "@/features/editor/config/constants";
+import { useEditorStateStore } from "@/features/editor/stores/state.store";
+import { usePaneStore } from "@/features/panes/stores/pane.store";
 import { JavaLaunchDecisionBanner } from "./java-launch-decision";
 import { useMavenStore } from "@/features/maven/stores/maven.store";
+import type { MavenModule } from "@/features/maven/types/maven.types";
+import { joinPath } from "@/utils/path-helpers";
 import { useRunPreferencesStore } from "../stores/run-preferences.store";
+
+/** Opens the file behind a clickable output fragment with the cursor on the
+ *  referenced line, mirroring the Lithe log viewer's reveal behavior. */
+async function openOutputSourceTarget(target: OutputSourceTarget): Promise<void> {
+  let content: string;
+  try {
+    content = await readFileContent(target.path);
+  } catch {
+    return;
+  }
+  const bufferStore = useBufferStore.getState();
+  const existing = bufferStore.buffers.find(
+    (buffer) => buffer.type === "editor" && buffer.path === target.path,
+  );
+  const bufferId =
+    existing?.id ??
+    bufferStore.actions.openContent({
+      type: "editor",
+      path: target.path,
+      name: target.path.split(/[\\/]/).filter(Boolean).pop() ?? target.path,
+      content,
+    });
+
+  const line = Math.max(0, target.line - 1);
+  const viewState = {
+    cursor: { line, column: Math.max(0, (target.column ?? 1) - 1), offset: 0 },
+    selection: undefined,
+    scrollTop: Math.max(0, (line - 8) * EDITOR_CONSTANTS.DEFAULT_LINE_HEIGHT),
+    scrollLeft: 0,
+  };
+  const editorActions = useEditorStateStore.getState().actions;
+  editorActions.cacheViewStateForBuffer(bufferId, viewState);
+  const activePane = usePaneStore.getState().actions.getActivePane();
+  if (activePane) {
+    editorActions.cacheViewStateForBuffer(`${activePane.id}:${bufferId}`, viewState);
+  }
+  useBufferStore.getState().actions.setActiveBuffer(bufferId);
+}
 
 /** Explains when the Java entries shown are not JDT's current answer. */
 function JavaDiscoveryNotice() {
@@ -66,6 +114,36 @@ function JavaDiscoveryNotice() {
 export default function RunPane() {
   const { t } = useTranslation();
   const rootFolderPath = useFileSystemStore((state) => state.rootFolderPath);
+  const mavenProject = useMavenStore((state) =>
+    state.root === rootFolderPath ? state.project : null,
+  );
+  // Stack frames resolve against every declared source root across modules,
+  // preferring the project model over the conventional src/main/java layout.
+  // Module and source-root paths are module-relative, mirroring how the Maven
+  // pane composes them with the reactor root.
+  const sourceRoots = useMemo(() => {
+    if (!mavenProject || !rootFolderPath) return [];
+    const projectPath = mavenProject.relativePath === "." ? [] : [mavenProject.relativePath];
+    const roots: string[] = [];
+    const walk = (modules: MavenModule[], prefix: string[]) => {
+      for (const module of modules) {
+        const segments = module.relativePath === "." ? prefix : [...prefix, module.relativePath];
+        for (const sourceRoot of module.sourceRoots) {
+          roots.push(joinPath(rootFolderPath, ...projectPath, ...segments, sourceRoot.path));
+        }
+        walk(module.modules, segments);
+      }
+    };
+    walk(mavenProject.modules, []);
+    return roots;
+  }, [mavenProject, rootFolderPath]);
+  // Re-linked per workspace or project model change; resolution itself is
+  // pure and memoized downstream by the output render.
+  const resolveOutputLocation = useMemo(
+    () => (line: string) =>
+      resolveOutputLocationIn(line, { workspaceRoot: rootFolderPath ?? "", sourceRoots }),
+    [rootFolderPath, sourceRoots],
+  );
   const isBottomPaneVisible = useUIState((state) => state.isBottomPaneVisible);
   const setIsBottomPaneVisible = useUIState((state) => state.setIsBottomPaneVisible);
   const openSettings = useUIState((state) => state.openSettingsDialog);
@@ -385,6 +463,8 @@ export default function RunPane() {
                   wrapLines={wrapOutputLines}
                   wrapLabel={t("run.wrapOutputLines")}
                   onToggleWrapLines={() => setWrapOutputLines(!wrapOutputLines)}
+                  resolveLocation={resolveOutputLocation}
+                  onOpenLocation={(target) => void openOutputSourceTarget(target)}
                 />
               </div>
               {isSelectedRunning ? (

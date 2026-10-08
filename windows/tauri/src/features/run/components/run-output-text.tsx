@@ -1,5 +1,6 @@
 import { useMemo, useRef, type KeyboardEvent } from "react";
-import { renderRunOutput } from "../utils/run-output-style";
+import { renderRunOutput, type OutputLocationResolver } from "../utils/run-output-style";
+import type { OutputSourceTarget } from "../utils/run-output-locations";
 import {
   ContextMenu,
   ContextMenuCheckboxItem,
@@ -15,6 +16,8 @@ export function RunOutputText({
   wrapLines = true,
   wrapLabel,
   onToggleWrapLines,
+  resolveLocation,
+  onOpenLocation,
 }: {
   source: string;
   emptyLabel: string;
@@ -26,9 +29,15 @@ export function RunOutputText({
    *  callback is provided, so store-less consumers stay unchanged. */
   wrapLabel?: string;
   onToggleWrapLines?: () => void;
+  /** Maps a log line to a clickable source target; null when it has none. */
+  resolveLocation?: OutputLocationResolver;
+  onOpenLocation?: (target: OutputSourceTarget) => void;
 }) {
   const preRef = useRef<HTMLPreElement>(null);
-  const spans = useMemo(() => renderRunOutput(source), [source]);
+  const spans = useMemo(
+    () => renderRunOutput(source, resolveLocation),
+    [source, resolveLocation],
+  );
 
   const outputClassName = wrapLines
     ? "whitespace-pre-wrap"
@@ -62,11 +71,30 @@ export function RunOutputText({
             outputClassName,
           )}
         >
-          {spans.map((span, index) => (
-            <span key={index} className={span.className} style={span.style}>
-              {span.text}
-            </span>
-          ))}
+          {spans.map((span, index) =>
+            span.location && onOpenLocation ? (
+              <span
+                key={index}
+                role="link"
+                tabIndex={0}
+                className={cn("cursor-pointer", span.className)}
+                style={span.style}
+                title={`${span.location.path}:${span.location.line}`}
+                onClick={() => onOpenLocation(span.location!)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  event.preventDefault();
+                  onOpenLocation(span.location!);
+                }}
+              >
+                {span.text}
+              </span>
+            ) : (
+              <span key={index} className={span.className} style={span.style}>
+                {span.text}
+              </span>
+            ),
+          )}
         </pre>
       ) : (
         <pre
